@@ -1,0 +1,12 @@
+#!/bin/bash
+
+DIR=/data/fucina/develop/traffic_shaping/polltc
+
+polltc_pid=`ps auxw | egrep -e "/polltc_eth1" | awk '{print $2}'`
+[ ! -z "${polltc_pid}" ] && kill -9 `echo ${polltc_pid}` 2>/dev/null
+
+
+[ "$2" == "debug" ]
+names="2:sip.3:interactive.4:http.5:default.6:p2p" $DIR/polltc_eth1 test 
+echo $(( $$+1 ))
+exit 0

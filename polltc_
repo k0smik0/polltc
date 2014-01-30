@@ -1,0 +1,563 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use RRDs;
+use Cwd;
+use Data::Dumper;
+#  
+# Deal with the output from the `tc` command in an attempt to
+# build up a functional hierarchy of traffic control classes
+# for some kind of graphing.  If the configuration changes while
+# this script is running in a loop, it will break horribly.
+
+# The logic for associating qdiscs and classes with each other
+# is from tc-graph.pl by Andreas Klauer (Andreas.Klauer@metamorpher.de)
+# v0.13.
+# It's possible to walk through %parent_hash and %child_hash and
+# determine the hierarchy structure, although I am not certain why
+# you would want to do this ever.  Since it works, I am going to
+# leave all that code here anyway.
+
+# 20140130 v1.06 (Massimiliano Leone)
+# fix support for hfsc
+# changed unit from kbit to kByte
+
+# 20060307 v1.05
+# Fixed incomplete hfsc support (no, really...)
+# Removed extra debug statements
+
+# 20060302 v1.04
+# Added support for wrr (Lee Sanders)
+# Added additional debugging (Lee Sanders)
+# Added support for hfsc qdisc
+# Fixed memory leak in commandline mode (Lee Sanders)
+# Fixed regex for matching qdisc output (reported by Mike Hughes)
+# Changed RRDs update to use --template
+
+# 20051003 v1.03
+# Added support for pulling readable names for class minor ids from ENV
+# Added support for stacked graphs, but set default to LINE2
+# Added the graph into the network group for Munin (Xavier Dutoit, sydesy ltd)
+# Changed graph to be stacked with areas instead of lines (Xavier Dutoit, sydesy ltd)
+#
+# 20050128 v1.02
+# Fixed pattern matching for htb root classes
+# Fixed pattern matching for variable height htb classes
+# Fixed debug output with appropriate newlines
+# Added colors with a default grey when all have been used
+#
+# 20041027 v1.01
+# Fixed pattern matching for htb classes
+#
+# 20041023 v1.0
+# Added support for pfifo / bfifo (i.e. added to regexp)
+#
+# 20041021
+# Added support for classful tbf qdisc in 2.6.1 and later kernels
+#
+# 20041009
+# Project initiated
+
+# RRDTool links
+# http://www.cuddletech.com/articles/rrd/ar01s02.html
+# http://martybugs.net/linux/hddtemp.cgi
+# Broken Link -> http://people.ee.ethz.ch/~oetiker/webtools/rrdtool/tutorial/cdeftutorial.html
+# Broken Link -> http://faq.mrtg.org/RPN.html
+
+### CONFIGURATION
+
+# Where do you want the RRD files to live?
+
+#my $rrd_path = getcwd;
+my $rrd_path = '/var/www/tc';
+
+my @hostname = `hostname`;
+if( $hostname[0] =~ m/rebecca/i ) {
+	$rrd_path = '/var/www/tc';
+}
+
+# Create graphs?
+
+my $do_graph = 1;
+
+# Use STACK and AREA instead of LINE2 for each traffic classs
+
+my $do_stack = 0;
+
+# You'll want to specify your path to the `tc` binary
+
+my $BIN_TC="/sbin/tc";
+
+# Pick some nice colours (Borrowed from Munin)
+
+my @colors = qw(
+22ff22 0022ff ff0000 00aaaa ff00ff
+ffa500 cc0000 0000cc 0080C0 8080C0 FF0080
+800080 688e23 408080 808000 000000 00FF00
+0080FF FF8000 800000 FB31FB
+);
+
+# You could change this to 1 for debugging output in the form
+# of lots of print statements.
+
+sub debug { 0 }
+sub verbose { 1 }
+
+# Fetch real names for our minor handles from environment for
+# initial Munin autoconfig and for commandline mode.
+
+my @tcnames;
+my %tcnames;
+
+if( exists $ENV{names} ) {
+	@tcnames = split( /\./, $ENV{names} );
+	@tcnames = map { /([^:]*):(.*)/;defined($1 && $2) && $1,$2 } @tcnames;
+	@tcnames = grep { defined } @tcnames;
+	die "Odd number of arguments in names environment variable"
+		if @tcnames & 1;
+	%tcnames = @tcnames;
+}
+
+my %parent_hash;
+my %child_hash;
+my %stats;
+my $do_munin;
+my $do_munin_conf;
+
+# I'm lazy, so it's a package global
+
+our $DEV;
+
+sub parse_tc_qdisc {
+	my( $bytes, $pkts, $drop, $over );
+	my( $name, $id );
+
+	my @qdisc = `$BIN_TC -s qdisc show dev $DEV`;
+
+   my $l = scalar(@qdisc);
+verbose && printf ($l."\n".@qdisc."\n");
+	for( my $x = 0; $x < $l; $x++ ) {
+
+		next unless $qdisc[$x] =~ m/qdisc/;
+
+		if( $qdisc[$x] =~ m/qdisc pfifo_fast 0:/i ) {
+			# Sanity check
+			die "traffic control configuration was removed!";
+		}
+
+		if( $qdisc[$x] =~ m/(?:htb|hfsc|prio|sfq|tbf|pfifo|bfifo)/i ) {
+			( $name, $id ) = ( $qdisc[$x] =~ m/^\s?qdisc\s+(\w+)\s+([^\s]+)\s+/i );
+			( $bytes, $pkts, $drop, $over ) = ( $qdisc[$x+1] =~ m/Sent (\d+) \w+ (\d+) \w+ \(\w+ (\d+), \w+ (\d+)/i );
+#			$x++;
+			$stats{ $id } = {
+				bytes => int($bytes/8/1000),
+				pkts => $pkts,
+				drop => $drop,
+				over => $over
+			};
+		}
+		elsif( $qdisc[$x] =~ m/wrr/i ) {
+			( $name, $id ) = ( $qdisc[$x] =~ m/^\s?qdisc\s+(\w+)\s+([^\s]+)/i );
+			( $bytes, $pkts, $drop, $over ) = ( $qdisc[$x+5] =~ m/Sent (\d+) \w+ (\d+) \w+ \(\w+ (\d+), \w+ (\d+)/i );
+#			$x+=5;
+			$stats{ $id+5 } = {
+				bytes => int($bytes/8/1000),
+				pkts => $pkts,
+				drop => $drop,
+				over => $over
+			};
+		}
+      elsif ( $qdisc[$x] =~ m/(?:ingress)/i ) {
+         ( $name, $id ) = ( $qdisc[$x] =~ m/^\s?qdisc\s+(\w+)\s+([^\s]+)\s+/i );
+         ( $bytes, $pkts, $drop, $over ) = ( $qdisc[$x+1] =~ m/Sent (\d+) \w+ (\d+) \w+ \(\w+ (\d+), \w+ (\d+)/i );               
+#         if ( debug ) {
+#         }
+      }
+ 
+verbose && printf ("printing qdiscs: ".$name." ".$id." ".$bytes." ".$pkts." ".$drop." ".$over."\n") ;
+		if( ! defined $id && debug ) {
+			die "Unmatched handle for tc qdisc output:\n$qdisc[$x]\n";
+		}
+		$child_hash{ $id } = [] if defined $id;
+#		push( @{$child_hash{ $id }}, 0 );
+#		pop( @{$child_hash{ $id }} );
+
+	}
+}
+
+sub parse_tc_class {
+	my( $bytes, $pkts, $drop, $over ) = (0);
+	my( $name, $id, $type, $qdisc ) = ("");
+	my( $parent_id, $leaf, $leaf_id ) = ("");
+	my( $address );
+
+	my @class = `$BIN_TC -s class show dev $DEV`;
+
+	for( my $x = 0; $x < scalar(@class); $x++ ) {
+
+		# Try to gather information about class relationship hierarchy.
+		# Really should just grab lines with 'class' keyword and then strip out
+		# $qdisc $n:\d? parent $m:\d? || $qdsic $n:\d? root
+		# Really should be that simply for most classes.  WRR seems to be an
+		# exception.
+
+		next unless $class[$x] =~ m/class/;
+
+		# Handle the specifics of the htb|hfsc classes
+
+		if( $class[$x] =~ m/(?:htb|hfsc)/i ) {
+			if( $class[$x] =~ m/root/i ) {
+				# This is wrong; But fortunately we don't care much since its root
+				( $name, $id, $type ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)/i );
+			}
+			else {
+				if( $class[$x] =~ m/htb|hfsc/ ) {
+					( $name, $id, $type, $qdisc, $leaf, $leaf_id ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+				}
+				else {
+					( $name, $id, $type, $qdisc) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+				}
+verbose && printf ("parsing classes: ".$name." ".$id." ".$type." ".$qdisc." ".$leaf." ".$leaf_id."\n") ;
+			}
+		}
+
+		# Handle prio classes
+		elsif( $class[$x] =~ m/prio/i ) {
+			( $name, $id, $type, $qdisc, $leaf, $leaf_id ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+		}
+
+		# Deal with tbf classes, which appear in Linux 2.6.1 and later
+		elsif( $class[$x] =~ m/tbf/i ) {
+			# Someone overwrote the tbf default
+			if( $class[$x] =~ m/leaf/i ) {
+				( $name, $id, $type, $qdisc, $leaf, $leaf_id ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+			}
+			# It's old style tbf without a leaf
+			else {
+				( $name, $id, $type, $qdisc, $leaf ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+			}
+#			next;
+		}
+#n      elsif( $class[$x] =~ m/sfq/i ) {
+#n#         print "sfq: ".$class[$x] ;
+#n#         my $tmp ;
+#n#         ( $name, $id, $type, $qdisc, $leaf, $leaf_id ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+#n         my @cv = split(' ',$class[$x]);
+#n         $name = $cv[1];
+#n         $type = "parent";
+#n         $id = $cv[2];
+#n         $leaf = $cv[4];
+#n#         $qdisc = 
+#n#         printf $name." ".$type." ".$id."\n";
+#n      }
+		elsif( $class[$x] =~ m/^\s+$/ ) {
+			# We found any empty line; This is generally ok
+			next;
+		} 
+
+		###################################
+		# Deal with WRR class
+		elsif( $class[$x] =~ m/wrr/i ) {
+			( $name, $id, $type, $qdisc ) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
+			($leaf,$leaf_id)= split(/:/,$id);
+			if (defined $class[$x+1] && $class[$x+1] =~ m/address:/) {
+				( $address ) = ( $class[$x+1] =~ m/^\s+\(address:\s+(.*)\)/i );
+                        	$tcnames{$leaf_id} = $address;
+				$leaf_id = $leaf_id.":";
+#				$x+=4;
+			} else { # unused class 
+				$tcnames{$leaf_id} = "$leaf_id undef";
+				$leaf_id = $leaf_id.":";
+			}
+		}
+		###################################
+		else {
+			# Empty line or unrecognized class type.
+			debug && print "Came across unrecognized class\n";
+			next;
+		}
+
+		if( $type eq "root" ) {
+
+			# Root class. No parent class, but parent qdisc.
+			# We get the parent qdisc handle by removing Y from X:Y.
+			$parent_id = $id;
+			$parent_id =~ s/:.*/:/;
+
+			# Tell qdisc that this is its child_hash.
+			$parent_hash{$id} = $parent_id;
+			push(@{$child_hash{$parent_id}}, $id);
+        }
+		elsif($type eq "parent") {
+
+			# Child class with parent class.
+#			$parent_id = $qdisc;
+         $parent_id = $id;
+verbose && printf("parent_id: ".$id."\n");
+			# Tell parent that it has a child_hash.
+			$parent_hash{$id} = [$parent_id];
+			push(@{$child_hash{$parent_id}}, $id);
+#         printf("parent_id: ".$parent_id."\n");
+#          while ( my ($key, $value) = each(%parent_hash) ) {
+#            print "parent ".$key." => ".$value."\n";
+#         }
+
+      }
+
+		if($leaf) {
+
+			# Yo cool we got a leaf here.
+			$parent_hash{$leaf_id} = [$leaf_id];
+     		push( @{$child_hash{ $id }}, $leaf_id );
+			# lets just say that you can only have one child leaf and this solves the bug
+			# where the number of items in the child_hash increases with each script loop.
+			$child_hash{$id} = [$leaf_id] ;
+verbose && printf("leaf_id: ".$leaf_id."\n");
+#         while ( my ($key, @value) = each(%child_hash) ) {
+#            my $v = join(", ", $value);
+#            print "$key => @value\n";
+#         }
+        }
+
+	}
+verbose && print "\n";
+
+}
+
+sub update_rrd {
+
+	if( ! -e "$rrd_path/" . "$DEV-tc.rrd" ) {
+		my @ds;
+		foreach my $key (sort keys %stats) {
+
+			$key =~ s/:/-/g;
+			push( @ds, "DS:$key:DERIVE:60:0:U" );
+		}
+		# Track for 24 hours
+		RRDs::create(
+			"$rrd_path/" . "$DEV-tc.rrd",
+			'--step=10',
+			@ds,
+			'RRA:AVERAGE:0.5:1:8640'
+		);
+		die RRDs::error . "\n" if RRDs::error;
+	}
+
+	debug && print "N:" . join( ':', map { $stats{$_}->{bytes} } sort keys %stats ) , "\n";
+
+   # Perform actual update
+
+	RRDs::update(
+		"$rrd_path/" . "$DEV-tc.rrd",
+		'--template='. join( ':', map { my $a = $_ ; $a =~ s/:/-/; $a } sort keys %stats ),
+		'N:' . join( ':', map { $stats{$_}->{bytes} } sort keys %stats )
+	);
+	die RRDs::error . "\n" if RRDs::error;
+
+}
+
+sub do_graph {
+
+	# Time periods to graph, in hours.
+	# (Obviously you can get away with fractions here, like 0.25)
+   # actual is: 1 hour, 24 hours
+   # actual is: 1 minute, 5 minutes, 15 minutes, 30 minutes, 1 hours, 3 hours, 6 hours, 12 hours, 24 hours, 36 hours
+#	my @imes = qw( 0.0166 0.083 0.249 0.498 1 3 6 12 24 );
+#	                6s   1m   4.8m 15m  30m 1h 3h 6h 12h 24h 36h
+   my @times = qw( 0.01 0.02 0.08 0.25 0.5 1 3 6 12 24 36 );
+#   my @times = qw( 1 24 );
+   # 1 24
+
+	foreach my $period (@times) {
+
+		my $x;
+		my $cur_time = time();
+		my $end_time = $cur_time;
+		my $start_time = $end_time - ($period * 60 * 60);
+
+		my @graph_rrd;
+		push( @graph_rrd, "--imgformat","PNG" );
+		push( @graph_rrd, "--title", "Traffic Control Leafs" );
+		push( @graph_rrd, "--vertical-label", "kB/s" );
+		push( @graph_rrd, "--no-minor" );
+		push( @graph_rrd, "--start", $start_time );
+		push( @graph_rrd, "--end", $end_time );
+		push( @graph_rrd, "--width", 600 );
+		push( @graph_rrd, "--height", 400 );
+
+		$x = 0;
+		my $first = 1;
+		foreach my $key (sort keys %stats) {
+			if( ! defined $colors[$x] ) { $colors[$x] = 'cccccc'; }
+			$key =~ s/:/-/g;
+			push( @graph_rrd, "DEF:id$x=$rrd_path/$DEV-tc.rrd:$key:AVERAGE" );
+			# Deal with huge negative value from resetting `tc` configuration
+			# Multiply the value by 8
+			push( @graph_rrd, "CDEF:cdef$x=id$x,0,LT,UNKN,id$x,8,*,IF" );
+			if( $key !~ m/\d$/ ) {
+				$key =~ s/-//g;
+			}
+
+			if( exists $tcnames{$key} ) {
+				$key = $tcnames{$key};
+			}
+
+			if( $do_stack ) {
+				if( $first ) {
+					push( @graph_rrd, "AREA:cdef$x#$colors[$x]:$key" );
+					$first = 0;
+				}
+				else {
+					push( @graph_rrd, "STACK:cdef$x#$colors[$x]:$key" );
+				}
+			}
+			else {
+				push( @graph_rrd, "LINE2:cdef$x#$colors[$x]:$key" );
+			}
+			$x++;
+		}
+
+		push( @graph_rrd, 'COMMENT:\s', 'COMMENT:\s' );
+
+		$x = 0;
+		foreach my $key (sort keys %stats) {
+#         printf($key."\n");
+			$key =~ s/:/-/g;
+			if( $key !~ m/\d$/ ) {
+				$key =~ s/-//g;
+			}
+			if( exists $tcnames{$key} ) {
+				$key = $tcnames{$key};
+			}
+			push( @graph_rrd, "GPRINT:cdef$x:LAST:$key \\: %6.0lf kB/s" );
+			$x++;
+		}
+
+		debug && print join(" \n", @graph_rrd ) , "\n";
+
+		RRDs::graph(
+			"$rrd_path/" . "$DEV-$period-tc.png",
+			@graph_rrd
+		);
+		die RRDs::error . "\n" if RRDs::error;
+
+	}
+}
+
+# Let's pretend we're autoconf capable for Munin.
+
+if( defined $ARGV[0] && $ARGV[0] eq 'autoconf' ) {
+	if( scalar( keys %stats ) ) {
+		print "yes\n";
+		exit 0;
+	}
+	else {
+		print "no\n";
+		exit 1;
+	}
+}
+
+# Get down to business
+
+if( defined $ARGV[0] && $ARGV[0] eq 'test' ) {
+	$do_munin = 0;
+	$do_munin_conf = 0;
+}
+elsif( defined $ARGV[0] && $ARGV[0] eq 'config' ) {
+	$do_munin = 1;
+	$do_munin_conf = 1;
+}
+else {
+	$do_munin = 1;
+	$do_munin_conf = 0;
+}
+
+# This assumes, of course, that you don't have the script
+# running from a directory with an underscore ( _ ) in it.
+# If you do, this'll break hard.
+
+$0 =~ m/polltc_([^_]*)$/;
+$DEV = $1;
+
+do {
+	parse_tc_qdisc;
+	parse_tc_class;
+
+	debug && print "Parent Assocations ->\n";
+	debug && print Dumper( \%parent_hash );
+	debug && print "Child Associations ->\n";
+	debug && print Dumper( \%child_hash );
+
+	# Delete things that aren't leaf nodes
+	foreach my $id (keys %stats) {
+		if( scalar( @{ $child_hash{ $id } } ) > 0 ) {
+			debug && print "Deleted ID $id [ ". scalar( @{ $child_hash{ $id } } )." kids ]\n";
+			delete $stats{$id};
+		}
+	}
+	debug && print "Found ". scalar( keys %stats ) ." leafs\n";
+
+	if( $do_munin ) {
+
+		if( $do_munin_conf ) {
+			print "graph_title Traffic Control Leafs\n";
+			print "graph_category network\n";
+			print "graph_args --base 1000 -l 0\n";
+			print "graph_vlabel kB/s\n";
+		}
+		my $firstband = 1;
+      my $y = 0;
+		foreach my $key (sort keys %stats) {
+			my $k = $key;
+			$key =~ s/:/-/g;
+         print "$key.draw DEF:id$y=$rrd_path/$DEV-tc.rrd:$key:AVERAGE";
+         # Deal with huge negative value from resetting `tc` configuration
+         # Multiply the value by 8
+         print "$key.CDEF:cdef$y=id$y,0,LT,UNKN,id$y,8,*,IF";
+			if( $key !~ m/\d$/ ) {
+				$key =~ s/-//g;
+			}
+			if( $do_munin_conf ) {
+				my( $name );
+				if( exists $tcnames{$key} ) {
+					$name = $tcnames{$key};
+				}
+				else {
+					$name = $key;
+				}
+				print "$key.label $name\n";
+				if( $do_stack ) {
+					if( $firstband ) {
+						print "$key.draw AREA\n";
+						$firstband = 0;
+					}
+					else {
+						print "$key.draw STACK\n";
+					}
+				}
+				else {
+					print "$key.draw LINE2\n";
+				}
+				print "$key.type DERIVE\n";
+				print "$key.min 0\n";
+				print "$key.max 12500000\n";
+				print "$key.cdef $key,0,LT,UNKN,$key,8,*,IF\n";
+			}
+			else {
+				print "$key.value ", $stats{$k}->{bytes}, "\n";
+			}
+         $y++;
+		}
+		exit 0;
+	}
+	else {
+		update_rrd;
+		do_graph if $do_graph;
+		sleep 10;
+	}
+} until( $do_munin > 0 );
+
+
+

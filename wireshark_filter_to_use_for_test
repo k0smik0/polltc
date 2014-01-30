@@ -1,0 +1,1 @@
+! (udp.port == 53 || tcp.port == 80 || tcp.port == 443 || tcp.port == 22 || udp.port == 1190 || udp==5060||udp==5061|| (tcp.port>=6667&&tcp.port<=6670) || (tcp.port>=24680 && tcp.port<=24695) || (udp.port>=24680 && udp.port<=24695) || (tcp.port >= 36850 && tcp.port <= 36895) || (udp.port >= 36850 && udp.port <= 36895)|| sip || udp.srcport==1190 || udp.dstport==1190)
