@@ -72,7 +72,7 @@ use Env;
 # Where do you want the RRD files to live?
 
 #my $rrd_path = getcwd;
-my $rrd_path = '/var/polltc';
+my $rrd_path = '/var/tmp/polltc';
 
 my @hostname = `hostname`;
 #if( $hostname[0] =~ m/rebecca/i ) {

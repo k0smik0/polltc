@@ -4,6 +4,11 @@ Last Updated: 20131214 (k0smik0 - Massimiliano Leone)
 
  - This version definitely adds hfsc support
  - kiloBytes unit is used in place of kilobits
+ - default traffic is also showed (while old version was showing only traffic from explicity created queues)
+ - a html interface is provided: you should rename "INTERFACE-USING-TO-CHANGE.html" to "eth1.html" if you're 
+   monitoring eth1, and so on.. then you must move that file in /var/tmp/polltc, since polltc script writes 
+   output images there and html file reads images from same directory it is on. 
+   Of course, you can link that dir within /var/www/ for any webserver purpose
 
 <br/><br/>
 Previous Updated: 20050923 (JasonB)
