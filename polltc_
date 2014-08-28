@@ -6,6 +6,7 @@ use warnings;
 use RRDs;
 use Cwd;
 use Data::Dumper;
+use Env;
 #  
 # Deal with the output from the `tc` command in an attempt to
 # build up a functional hierarchy of traffic control classes
@@ -71,12 +72,12 @@ use Data::Dumper;
 # Where do you want the RRD files to live?
 
 #my $rrd_path = getcwd;
-my $rrd_path = '/var/www/tc';
+my $rrd_path = '/var/polltc';
 
 my @hostname = `hostname`;
-if( $hostname[0] =~ m/rebecca/i ) {
-	$rrd_path = '/var/www/tc';
-}
+#if( $hostname[0] =~ m/rebecca/i ) {
+#	$rrd_path = '/var/www/tc';
+#}
 
 # Create graphs?
 
@@ -93,8 +94,8 @@ my $BIN_TC="/sbin/tc";
 # Pick some nice colours (Borrowed from Munin)
 
 my @colors = qw(
-22ff22 0022ff ff0000 00aaaa ff00ff
-ffa500 cc0000 0000cc 0080C0 8080C0 FF0080
+000000 999999 22ff22 0022ff ff0000 ffa500 ff00ff
+0080c0 cc0000 00aaaa 0000cc 8080C0 FF0080
 800080 688e23 408080 808000 000000 00FF00
 0080FF FF8000 800000 FB31FB
 );
@@ -103,7 +104,7 @@ ffa500 cc0000 0000cc 0080C0 8080C0 FF0080
 # of lots of print statements.
 
 sub debug { 0 }
-sub verbose { 1 }
+my $verbose = 0;
 
 # Fetch real names for our minor handles from environment for
 # initial Munin autoconfig and for commandline mode.
@@ -111,13 +112,18 @@ sub verbose { 1 }
 my @tcnames;
 my %tcnames;
 
-if( exists $ENV{names} ) {
-	@tcnames = split( /\./, $ENV{names} );
+my $name_id;
+#my %names = $ENV{'names'});
+#printf ("names: ".%names);
+if( exists $ENV{'names'} ) {
+	@tcnames = split( /\./, $ENV{'names'} );
 	@tcnames = map { /([^:]*):(.*)/;defined($1 && $2) && $1,$2 } @tcnames;
 	@tcnames = grep { defined } @tcnames;
 	die "Odd number of arguments in names environment variable"
 		if @tcnames & 1;
 	%tcnames = @tcnames;
+   $name_id = $tcnames[0];
+#   print "name_id: ".$name_id;
 }
 
 my %parent_hash;
@@ -137,7 +143,7 @@ sub parse_tc_qdisc {
 	my @qdisc = `$BIN_TC -s qdisc show dev $DEV`;
 
    my $l = scalar(@qdisc);
-verbose && printf ($l."\n".@qdisc."\n");
+if ($verbose) { printf ("total qdisc result lines: $l\n"); }
 	for( my $x = 0; $x < $l; $x++ ) {
 
 		next unless $qdisc[$x] =~ m/qdisc/;
@@ -176,7 +182,7 @@ verbose && printf ($l."\n".@qdisc."\n");
 #         }
       }
  
-verbose && printf ("printing qdiscs: ".$name." ".$id." ".$bytes." ".$pkts." ".$drop." ".$over."\n") ;
+if ($verbose) { printf ("printing qdiscs: ".$name." ".$id." ".$bytes." ".$pkts." ".$drop." ".$over."\n") };
 		if( ! defined $id && debug ) {
 			die "Unmatched handle for tc qdisc output:\n$qdisc[$x]\n";
 		}
@@ -219,7 +225,7 @@ sub parse_tc_class {
 				else {
 					( $name, $id, $type, $qdisc) = ( $class[$x] =~ m/^class\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)\s+(\w+)\s+([^\s]+)/i );
 				}
-verbose && printf ("parsing classes: ".$name." ".$id." ".$type." ".$qdisc." ".$leaf." ".$leaf_id."\n") ;
+if ($verbose) { printf ("parsing classes: ".$name." ".$id." ".$type." ".$qdisc." ".$leaf." ".$leaf_id."\n") ; }
 			}
 		}
 
@@ -295,7 +301,7 @@ verbose && printf ("parsing classes: ".$name." ".$id." ".$type." ".$qdisc." ".$l
 			# Child class with parent class.
 #			$parent_id = $qdisc;
          $parent_id = $id;
-verbose && printf("parent_id: ".$id."\n");
+if ($verbose) { printf("parent_id: ".$id."\n"); }
 			# Tell parent that it has a child_hash.
 			$parent_hash{$id} = [$parent_id];
 			push(@{$child_hash{$parent_id}}, $id);
@@ -314,7 +320,7 @@ verbose && printf("parent_id: ".$id."\n");
 			# lets just say that you can only have one child leaf and this solves the bug
 			# where the number of items in the child_hash increases with each script loop.
 			$child_hash{$id} = [$leaf_id] ;
-verbose && printf("leaf_id: ".$leaf_id."\n");
+if ($verbose) { printf("leaf_id: ".$leaf_id."\n"); }
 #         while ( my ($key, @value) = each(%child_hash) ) {
 #            my $v = join(", ", $value);
 #            print "$key => @value\n";
@@ -322,7 +328,7 @@ verbose && printf("leaf_id: ".$leaf_id."\n");
         }
 
 	}
-verbose && print "\n";
+if($verbose) { print "\n"; }
 
 }
 
@@ -331,8 +337,8 @@ sub update_rrd {
 	if( ! -e "$rrd_path/" . "$DEV-tc.rrd" ) {
 		my @ds;
 		foreach my $key (sort keys %stats) {
-
 			$key =~ s/:/-/g;
+ debug &&            print "337:KEY $key\n";
 			push( @ds, "DS:$key:DERIVE:60:0:U" );
 		}
 		# Track for 24 hours
@@ -366,13 +372,14 @@ sub do_graph {
    # actual is: 1 minute, 5 minutes, 15 minutes, 30 minutes, 1 hours, 3 hours, 6 hours, 12 hours, 24 hours, 36 hours
 #	my @imes = qw( 0.0166 0.083 0.249 0.498 1 3 6 12 24 );
 #	                6s   1m   4.8m 15m  30m 1h 3h 6h 12h 24h 36h
-   my @times = qw( 0.01 0.02 0.08 0.25 0.5 1 3 6 12 24 36 );
+#   my @times = qw( 0.01 0.02 0.08 0.25 0.5 1 3 6 12 24 36 72 144 );
+   my @times = qw( 0.015 0.02 0.08 0.25 0.5 1 3 6 12 24 36 72 144 );
 #   my @times = qw( 1 24 );
    # 1 24
 
 	foreach my $period (@times) {
 
-		my $x;
+		my $x = '';
 		my $cur_time = time();
 		my $end_time = $cur_time;
 		my $start_time = $end_time - ($period * 60 * 60);
@@ -387,9 +394,14 @@ sub do_graph {
 		push( @graph_rrd, "--width", 600 );
 		push( @graph_rrd, "--height", 400 );
 
-		$x = 0;
+#     $x = 0;
+#print $name_id;     
+		$x = $name_id;
 		my $first = 1;
+#      printf "------------STATS BEGIN:\n".%stats."\nSTATS END\n";
 		foreach my $key (sort keys %stats) {
+ debug &&            print "397:KEY $key\n";
+#         push( @graph_rrd, "----KEY", $key);
 			if( ! defined $colors[$x] ) { $colors[$x] = 'cccccc'; }
 			$key =~ s/:/-/g;
 			push( @graph_rrd, "DEF:id$x=$rrd_path/$DEV-tc.rrd:$key:AVERAGE" );
@@ -399,11 +411,12 @@ sub do_graph {
 			if( $key !~ m/\d$/ ) {
 				$key =~ s/-//g;
 			}
-
+ debug &&            print "408:KEY $key\n";
 			if( exists $tcnames{$key} ) {
 				$key = $tcnames{$key};
 			}
 
+debug && print "413:KEY $key\n";
 			if( $do_stack ) {
 				if( $first ) {
 					push( @graph_rrd, "AREA:cdef$x#$colors[$x]:$key" );
@@ -421,9 +434,11 @@ sub do_graph {
 
 		push( @graph_rrd, 'COMMENT:\s', 'COMMENT:\s' );
 
-		$x = 0;
+#		$x = 0;
+      $x = $name_id;
 		foreach my $key (sort keys %stats) {
-#         printf($key."\n");
+#         push( @graph_rrd, "----KEY", $key);
+ debug &&            printf("435:KEY $key\n");
 			$key =~ s/:/-/g;
 			if( $key !~ m/\d$/ ) {
 				$key =~ s/-//g;
@@ -431,7 +446,8 @@ sub do_graph {
 			if( exists $tcnames{$key} ) {
 				$key = $tcnames{$key};
 			}
-			push( @graph_rrd, "GPRINT:cdef$x:LAST:$key \\: %6.0lf kB/s" );
+ debug &&            printf("443:KEY $key\n");
+			push( @graph_rrd, "GPRINT:cdef$x:LAST:$key\\:%6.0lf kB;" );
 			$x++;
 		}
 
@@ -441,8 +457,8 @@ sub do_graph {
 			"$rrd_path/" . "$DEV-$period-tc.png",
 			@graph_rrd
 		);
+#      debug && print ("here\n");
 		die RRDs::error . "\n" if RRDs::error;
-
 	}
 }
 
@@ -508,9 +524,13 @@ do {
 			print "graph_vlabel kB/s\n";
 		}
 		my $firstband = 1;
-      my $y = 0;
+#      my $y = 0;
+      my $y = $name_id;
 		foreach my $key (sort keys %stats) {
 			my $k = $key;
+ debug &&            printf("524:KEY $key\n");
+#         print "--------------------------- KEY $key";
+#         push( @graph_rrd, "----KEY", $key);
 			$key =~ s/:/-/g;
          print "$key.draw DEF:id$y=$rrd_path/$DEV-tc.rrd:$key:AVERAGE";
          # Deal with huge negative value from resetting `tc` configuration
@@ -526,7 +546,9 @@ do {
 				}
 				else {
 					$name = $key;
-				}
+            }
+
+debug &&    printf("544:KEY $key\n");
 				print "$key.label $name\n";
 				if( $do_stack ) {
 					if( $firstband ) {

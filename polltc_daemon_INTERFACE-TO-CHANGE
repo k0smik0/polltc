@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# change next 2 lines for your own configuration, then rename this file to "polltc_daemon_eth1" if you're using this for eth1.. etc
+
+DIR="/usr/local/polltc"
+INTF="eth1"
+
+
+
+
+### DO NOT TOUCH BELOW (UNTIL YOU ARE SURE YOU ARE DOING) ###
+
+OPTIONS='names=2:sip.3:interactive.4:http.5:default.6:p2p'
+PIDFile="/run/polltc_"${INTF}".pid"
+
+start_polltc() {
+   cd $DIR
+   export $OPTIONS
+   ${DIR}/"polltc_"${INTF} test >/dev/null 2>&1 &
+   cpid=$!
+   echo $cpid > $PIDFile
+}
+stop_polltc() {
+   [ -f $PIDFile ] && kill -9 $(cat $PIDFile)
+   rm -f $PIDFile
+}
+force_stop_polltc() {
+      polltc_pid=$(ps axuw | grep polltc | awk "$12 ~ /polltc_${INTF}$/" | awk '$11 ~ /perl/ {print $2}')
+      [ ! -z "${polltc_pid}" ] && kill -9 ${polltc_pid}
+}
+
+case "$1" in
+   start)
+      start_polltc
+      ;;
+   stop)
+      stop_polltc
+      ;;
+   force-stop)
+      force_stop_polltc
+      ;;
+   restart)
+      start_polltc
+      stop_polltc
+      ;;
+   *)
+#      echo "Usage: 
+      exit 1
+      ;;
+esac
+
+exit 0
