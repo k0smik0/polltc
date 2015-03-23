@@ -21,6 +21,9 @@ use Env;
 # you would want to do this ever.  Since it works, I am going to
 # leave all that code here anyway.
 
+# 20150323 v1.07 (Bernhard Geier)
+# Added support for fq_codel
+
 # 20140130 v1.06 (Massimiliano Leone)
 # fix support for hfsc
 # changed unit from kbit to kByte
@@ -153,7 +156,7 @@ if ($verbose) { printf ("total qdisc result lines: $l\n"); }
 			die "traffic control configuration was removed!";
 		}
 
-		if( $qdisc[$x] =~ m/(?:htb|hfsc|prio|sfq|tbf|pfifo|bfifo)/i ) {
+		if( $qdisc[$x] =~ m/(?:htb|hfsc|prio|sfq|tbf|pfifo|bfifo|fq_codel)/i ) {
 			( $name, $id ) = ( $qdisc[$x] =~ m/^\s?qdisc\s+(\w+)\s+([^\s]+)\s+/i );
 			( $bytes, $pkts, $drop, $over ) = ( $qdisc[$x+1] =~ m/Sent (\d+) \w+ (\d+) \w+ \(\w+ (\d+), \w+ (\d+)/i );
 #			$x++;
